@@ -1,4 +1,9 @@
+import html
 import re, string, calendar, requests, time
+import sys
+import urllib.parse
+import webbrowser
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from wikipedia import WikipediaPage
 import wikipedia
 from bs4 import BeautifulSoup
@@ -104,14 +109,6 @@ def get_polar_radius(planet_name: str) -> str:
     return match.group("radius")
 
 def get_birth_date(name: str) -> str:
-    """Gets birth date of the given person
-
-    Args:
-        name - name of the person
-
-    Returns:
-        birth date of the given person
-    """
     infobox_text = clean_text(get_first_infobox_text(get_page_html(name)))
     pattern = r"(?:Born\D*)(?P<birth>\d{4}-\d{2}-\d{2})"
     error_text = (
@@ -151,84 +148,43 @@ def get_wars(gun: str) -> str:
     error_text = "Page has no info on wars it was used in"
     match = get_match(infobox_text, pattern, error_text)
     return match.group(1)
-# def flag(flag: str) -> str:
-#     infobox_text = clean_text(get_first_infobox_text(get_page_html(gun)))
-#     pattern = r"Flag\s*(.*?)\n"
+
+def get_mohs_hardness_from_text(text: str) -> str:
+    """Extract Mohs scale hardness values from a text block (simple regex).
+
+    Returns the matched hardness string (e.g. "5.5 6" or "5.5-6").
+    """
+    pattern = r"Mohs.*?hardness\s*([0-9.\- ,]+)"
+    match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+    if not match:
+        raise AttributeError("Page has no Mohs hardness info")
+    return match.group(1).strip()
+
+def get_mohs_hardness(name: str) -> str:
+    """Fetch page infobox for `name` and extract Mohs hardness using a simple regex."""
+    infobox_text = clean_text(get_first_infobox_text(get_page_html(name)))
+    return get_mohs_hardness_from_text(infobox_text)
+
+def hardness_action(matches: List[str]) -> List[str]:
+    """Action wrapper for the pattern-action list that returns a user-friendly answer."""
+    name = " ".join(matches)
+    try:
+        value = get_mohs_hardness(name)
+        return [f"Mohs scale hardness for {name.title()}: {value}"]
+    except Exception as e:
+        return [f"Could not find Mohs hardness for {name.title()}: {e}"]
+# def get_flag(flag: str) -> str:
+#     infobox_text = clean_text(get_first_infobox_text(get_page_html(flag)))
+#     pattern = r"\s*(.*?)\n"
 #     error_text = "Page has no info on wars it was used in"
 #     match = get_match(infobox_text, pattern, error_text)
 #     return match.group(1)
-
-#Hangman
-def play_hangman(dummy: List[str]) -> List[str]:
-    """Starts a hangman game using a random U.S. state or city."""
-    places = [
-        "California", "Texas", "Florida", "New York",
-        "Chicago", "Houston", "Phoenix", "Philadelphia",
-        "San Antonio", "San Diego", "Dalla", "Moscow"
-    ]
-
-    secret = random.choice(places).lower()
-    display = ["_" if c.isalpha() else c for c in secret]
-    guessed = set()
-    lives = 6
-
-    print("\n🎮 Starting Hangman! Guess the U.S. state or city.")
-    print("I’ll also give you a clue once you get close.\n")
-
-    while lives > 0 and "_" in display:
-        print("Word:", " ".join(display))
-        print(f"Lives left: {lives}")
-        print(f"Guessed letters: {', '.join(sorted(guessed))}\n")
-
-        guess = input("Guess a letter: ").lower().strip()
-
-        if not guess.isalpha() or len(guess) != 1:
-            print("Please guess a single letter.\n")
-            continue
-
-        if guess in guessed:
-            print("You already guessed that.\n")
-            continue
-
-        guessed.add(guess)
-
-        if guess in secret:
-            print("Correct!\n")
-            for i, c in enumerate(secret):
-                if c == guess:
-                    display[i] = c
-        else:
-            print("Wrong!\n")
-            lives -= 1
-
-        # Give a clue when half the word is revealed
-        if display.count("_") <= len(secret) // 2:
-            try:
-                clue = get_population(secret.title())
-                print(f" Clue: Its population is around {clue}.\n")
-            except:
-                pass
-
-    if "_" not in display:
-        print(f"You win! The word was: {secret.title()}")
-    else:
-        print(f"Out of lives! The word was: {secret.title()}")
-
-    return ["Game over"]
 
 # below are a set of actions. Each takes a list argument and returns a list of answers
 # according to the action and the argument. It is important that each function returns a
 # list of the answer(s) and not just the answer itself.
 
 def birth_date(matches: List[str]) -> List[str]:
-    """Returns birth date of named person in matches
-
-    Args:
-        matches - match from pattern of person's name to find birth date of
-
-    Returns:
-        birth date of named person
-    """
     return [get_birth_date(" ".join(matches))]
 def endangered(matches: List[str]) -> List[str]:
 
@@ -273,8 +229,8 @@ pa_list: List[Tuple[Pattern, Action]] = [
     ("conservation status %".split(), endangered),
     ("what are the symptoms of %".split(), symptoms),
     ("what is the population of %".split(), population),
-    ("play hangman".split(), play_hangman),
     ("where was % used".split(), wars),
+    ("what is the hardness of %".split(), hardness_action),
     (["bye"], bye_action),
 ]
 
@@ -316,6 +272,115 @@ def query_loop() -> None:
 
     print("\nSo long!\n")
 
+HTML_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wikipedia Chatbot</title>
+    <style>
+        body {{ font-family: Arial, Helvetica, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; }}
+        h1 {{ color: #2c3e50; }}
+        input[type=text] {{ width: 100%; padding: 8px; margin: 8px 0; box-sizing: border-box; font-size: 1rem; }}
+        button {{ padding: 10px 16px; font-size: 1rem; cursor: pointer; }}
+        .answer {{ background: #f6f8fa; border: 1px solid #dfe3e6; padding: 14px; margin: 12px 0; white-space: pre-wrap; }}
+        .footer {{ color: #666; margin-top: 24px; font-size: 0.95rem; }}
+    </style>
+</head>
+<body>
+    <h1>Wikipedia Chatbot</h1>
+    <form action="/" method="get">
+        <label for="examples">Choose a example:</label>
+        <select id="examples" onchange="fillExample()">
+            <option value="">-- select an example --</option>
+            <option value="when was grace hopper born">when was % born</option>
+            <option value="what is the polar radius of earth">what is the polar radius of %</option>
+            <option value="infobox python (programming language)">infobox %</option>
+            <option value="conservation status giant panda">conservation status %</option>
+            <option value="what are the symptoms of influenza">what are the symptoms of %</option>
+            <option value="what is the population of canada">what is the population of %</option>
+            <option value="where was the ak-47 used">where was % used</option>
+            <option value="what is the hardness of quartz">what is the hardness of %</option>
+        </select>
+        <label for="q">Ask a question:</label>
+        <input id="q" name="q" type="text" placeholder="when was grace hopper born" autofocus value="$query">
+        <button type="submit">Ask</button>
+    </form>
+    $answer_html
+    <div class="footer">Hint: try questions like "when was % born" or "what is the polar radius of %".</div>
+    <script>
+        function fillExample() {
+            const select = document.getElementById('examples');
+            const query = document.getElementById('q');
+            if (select.value) {
+                query.value = select.value;
+                query.focus();
+            }
+        }
+    </script>
+</body>
+</html>
+"""
 
-# uncomment the next line once you've implemented everything are ready to try it out
-query_loop()
+def render_html(query: str = "", answers: List[str] = None) -> bytes:
+    answer_html = ""
+    if answers is not None:
+        if answers:
+            answer_html = "".join(f"<div class=\"answer\">{html.escape(ans)}</div>" for ans in answers)
+        else:
+            answer_html = "<div class=\"answer\">No answers</div>"
+    return string.Template(HTML_TEMPLATE).substitute(
+        query=html.escape(query),
+        answer_html=answer_html,
+    ).encode("utf-8")
+
+
+class WikiChatHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path.startswith("/favicon.ico"):
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        parsed = urllib.parse.urlparse(self.path)
+        query = ""
+        answers = None
+        if parsed.query:
+            params = urllib.parse.parse_qs(parsed.query)
+            query_list = params.get("q", [""])
+            query = query_list[0].strip()
+            if query:
+                normalized = query.replace("?", "").lower().split()
+                try:
+                    answers = search_pa_list(normalized)
+                except Exception:
+                    answers = [f"Could not find any info for '{query}'."]
+
+        content = render_html(query=query, answers=answers)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(content)))
+        self.end_headers()
+        self.wfile.write(content)
+
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+
+def run_web_server(host: str = "127.0.0.1", port: int = 8000) -> None:
+    url = f"http://{host}:{port}/"
+    server = HTTPServer((host, port), WikiChatHandler)
+    print(f"Starting Wikipedia chatbot web server at {url}")
+    print("Press Ctrl+C to stop.")
+    try:
+        webbrowser.open(url)
+    except Exception:
+        pass
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    if "--web" in sys.argv or "web" in sys.argv:
+        run_web_server()
+    else:
+        query_loop()
